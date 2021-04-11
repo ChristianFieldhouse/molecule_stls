@@ -1,7 +1,7 @@
 import numpy as np
 from PIL import Image
 from reality import atoms, radii, gaps
-from scipy.optimize import minimize
+from write_tube import tube, save_stl, sphere
 
 class Molecule:
     def __init__(self, atoms, bonds):
@@ -15,6 +15,9 @@ class Molecule:
 
     def length(self, v):
         return np.sqrt(np.sum(v**2))
+    
+    def dist(self, a, b):
+        return self.length(self.coords[a] - self.coords[b])
 
     def force(self, bond):
         """nudge atoms to the correct distance from their neighbours 
@@ -32,20 +35,15 @@ class Molecule:
     def nudge(self, atom):
         """nudge atoms into straight lines and onto the x-y plane"""
         others = set(range(len(self.atoms))) - self.neighbours(atom, 1) - {atom}
-        #print(atom, others)
         diffs = [self.coords[atom] - self.coords[other] for other in others]
         dists = [self.length(diff) for diff in diffs]
-        #print(diffs, dists)
         nudges = [
             self.logistic(1/dist, max_mag = 1, sig=10_000) * # govern dropoff
             self.logistic(1/dist, max_mag = 5, sig=100) * diff / dist # govern close
             for dist, diff in zip(dists, diffs)
         ]
-        #print(f"{nudges=}")
-        #nudge = np.sum(nudges)
         nudge = np.mean(nudges + [np.array((0, 0, 0))], axis=0)
-        to_z0 = np.array((0, 0, 0)) # np.array((0, 0, -1)) * self.logistic(self.coords[atom][2], max_mag = 5, sig=0.05)
-        #print(f"{to_z0=}")
+        to_z0 = np.array((0, 0, 0))
         return nudge + to_z0 + np.random.random(3) / 100
 
     def forces(self):
@@ -59,17 +57,11 @@ class Molecule:
             f[obond[1]] += vec * mag
         for atidx in range(len(self.atoms)):
             f[atidx] += self.nudge(atidx)
-        #print("forcemag", self.length(f))
-        #print(f"{f=}")
         return f
 
     def iterate_coords(self, its=1000):
         for i in range(its):
-            #print(self.coords)
             self.coords += self.forces()
-            #print(np.sqrt(np.sum((self.coords[0] - self.coords[1])**2)))
-            #print(np.sqrt(np.sum((self.coords[2] - self.coords[1])**2)))
-            #print(np.sqrt(np.sum((self.coords[2] - self.coords[3])**2)))
 
     def neighbours(self, atom, n):
         """get all atoms <= n steps from atom"""
@@ -92,6 +84,29 @@ class Molecule:
             ] = (int(255 * (c[2]-miz) / (maz - miz)), 255 - i * dif, 255 - i * dif)
         
         return Image.fromarray(im.astype("uint8"))
+
+    def to_stl(self, name, scale=1/10):
+        """one picometer gets scaled to `scale` millimeters"""
+        triangles = []
+        for bond in self.bonds:
+            obond = list(bond[0])
+            triangles += tube(
+                [
+                    self.coords[obond[0]] * scale,
+                    self.coords[obond[1]] * scale,
+                ],
+                r=1, # todo : depend on strength of bond?
+                k=20,
+                loop=False,
+            )
+        for i, atom in enumerate(self.atoms):
+            triangles += sphere(
+                self.coords[i] * scale,
+                radii[atom] * scale,
+                20,
+                20,
+            )
+        save_stl(triangles, name)
 
 def test_molicule():
     h2 = Molecule(["H", "H"], [({0, 1}, 1)])
@@ -122,12 +137,12 @@ def test_molicule():
 benzine = Molecule(
     ["C"]*6 + ["H"]*6,
     [
-        ({0, 1}, 1),
-        ({1, 2}, 2),
-        ({2, 3}, 1),
-        ({3, 4}, 2),
-        ({4, 5}, 1),
-        ({5, 0}, 2),
+        ({0, 1}, 1.5),
+        ({1, 2}, 1.5),
+        ({2, 3}, 1.5),
+        ({3, 4}, 1.5),
+        ({4, 5}, 1.5),
+        ({5, 0}, 1.5),
 
         ({0, 6}, 1),
         ({1, 7}, 1),
@@ -135,6 +150,48 @@ benzine = Molecule(
         ({3, 9}, 1),
         ({4, 10}, 1),
         ({5, 11}, 1),
+    ],
+)
+
+caffeine = Molecule(
+    ["C"]*3 + ["N", "C", "N"] + # hexagon
+    ["N", "C", "N"] + # pentagon
+    ["O"] * 2 +
+    ["C", "H", "H", "H"] * 3 +
+    ["H"]
+    [
+        ({0, 1}, 1), # hexagon
+        ({1, 2}, 2),
+        ({2, 3}, 1),
+        ({3, 4}, 1),
+        ({4, 5}, 1),
+        ({5, 0}, 1),
+        
+        ({1, 6}, 1), # pentagon
+        ({6, 7}, 1),
+        ({7, 8}, 2), # todo this electron is shared (?)
+        ({8, 2}, 1),
+        
+        ({0, 9}, 2), # oxygens
+        ({4, 10}, 2),
+        
+        ({5, 11}, 1), # methyl group
+        ({11, 12}, 1),
+        ({11, 13}, 1),
+        ({11, 14}, 1),
+        
+        ({3, 15}, 1), # methyl group
+        ({15, 16}, 1),
+        ({15, 17}, 1),
+        ({15, 18}, 1),
+
+        ({6, 19}, 1), # methyl group
+        ({19, 20}, 1),
+        ({19, 21}, 1),
+        ({19, 22}, 1),
+        
+        ({7, 23}, 1),
+    
     ],
 )
 
@@ -155,7 +212,9 @@ h33 = Molecule(
 h4 = Molecule(["H", "H", "H", "H"], [({0, 1}, 1), ({1, 2}, 1), ({2, 3}, 1), ({0, 3}, 1)])
 #h3 = Molecule(["H", "H", "H"], [({0, 1}, 1), ({1, 2}, 1)])
 h5 = Molecule(["H", "H", "H", "H", "H"], [({0, 1}, 1), ({1, 2}, 1), ({2, 3}, 1), ({3, 4}, 1), ({4, 0}, 1)])
+benzine.iterate_coords(2000)
 benzine.as_image().save("tempout.png")
+benzine.to_stl("benzine")
 
 if __name__ == "__main__":
     test_molicule()

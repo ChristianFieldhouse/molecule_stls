@@ -87,6 +87,7 @@ radii = {
 # todo webscrape these
 gaps = {
     ("C", "C", 1): 154, 
+    ("C", "C", 1.5): 140, # used for benzine
     ("C", "C", 2): 134, 
     ("C", "C", 3): 120, 
     ("C", "N", 1): 147,
