@@ -1,5 +1,6 @@
 import numpy as np
 from PIL import Image
+from tqdm import tqdm
 from reality import atoms, radii, gaps
 from write_tube import tube, save_stl, sphere
 
@@ -27,19 +28,21 @@ class Molecule:
         ab.sort(key=lambda x: atoms.index(x))
         gap = gaps[(ab[0], ab[1], bond[1])]
         dist = self.length(self.coords[ij[0]] - self.coords[ij[1]])
+        if dist < gap:
+            return 0 # rely on self.repel to push apart
         return (
             abs(self.logistic(gap - dist, max_mag=1, sig=1)) * # close convergence
             self.logistic(gap - dist, max_mag=10, sig=1/10)
         )
 
-    def nudge(self, atom):
+    def repel(self, atom):
         """nudge atoms into straight lines and onto the x-y plane"""
-        others = set(range(len(self.atoms))) - self.neighbours(atom, 1) - {atom}
+        others = set(range(len(self.atoms))) - {atom}
         diffs = [self.coords[atom] - self.coords[other] for other in others]
         dists = [self.length(diff) for diff in diffs]
         nudges = [
-            self.logistic(1/dist, max_mag = 1, sig=10_000) * # govern dropoff
-            self.logistic(1/dist, max_mag = 5, sig=100) * diff / dist # govern close
+            self.logistic(1/dist, max_mag = 1, sig=1000) * # govern dropoff
+            self.logistic(1/dist, max_mag = 50, sig=80) * diff / dist # govern close
             for dist, diff in zip(dists, diffs)
         ]
         nudge = np.mean(nudges + [np.array((0, 0, 0))], axis=0)
@@ -56,11 +59,11 @@ class Molecule:
             f[obond[0]] -= vec * mag
             f[obond[1]] += vec * mag
         for atidx in range(len(self.atoms)):
-            f[atidx] += self.nudge(atidx)
+            f[atidx] += self.repel(atidx)
         return f
 
-    def iterate_coords(self, its=1000):
-        for i in range(its):
+    def iterate_coords(self, its=100):
+        for i in tqdm(range(its)):
             self.coords += self.forces()
 
     def neighbours(self, atom, n):
@@ -87,26 +90,54 @@ class Molecule:
 
     def to_stl(self, name, scale=1/10):
         """one picometer gets scaled to `scale` millimeters"""
-        triangles = []
-        for bond in self.bonds:
-            obond = list(bond[0])
-            triangles += tube(
-                [
-                    self.coords[obond[0]] * scale,
-                    self.coords[obond[1]] * scale,
-                ],
-                r=1, # todo : depend on strength of bond?
-                k=20,
-                loop=False,
-            )
-        for i, atom in enumerate(self.atoms):
-            triangles += sphere(
-                self.coords[i] * scale,
-                radii[atom] * scale,
+        bond_radius = 10
+        atom_triangles = []
+        bond_triangles = []
+        bonds_done = []
+        for i, atom in tqdm(list(enumerate(self.atoms))):
+            asphere = sphere(
+                self.coords[i],
+                radii[atom],
                 20,
                 20,
             )
-        save_stl(triangles, name)
+            asphere = [np.array(t) for t in asphere]
+            for bond in [b[0] for b in self.bonds if i in b[0]]:
+                obond = list(bond)
+                dist = self.dist(obond[0], obond[1])
+                r0, r1 = radii[self.atoms[obond[0]]], radii[self.atoms[obond[1]]]
+                direction = self.coords[obond[1]] - self.coords[obond[0]]
+                direction = direction / self.length(direction)
+                atube = tube(
+                    [
+                        self.coords[obond[0]] + r0 * direction,
+                        self.coords[obond[1]] - r1 * direction,
+                    ],
+                    r=bond_radius, # todo : depend on strength of bond?
+                    k=20,
+                    loop=False,
+                )
+                print(len(asphere))
+                # todo : currently having to change print settings to make the
+                # molecule print as one object, should make triangles actually
+                # describe a surface instead of just having spheres + tubes intersecting
+                """ this was very slow, so not worth it...
+                for i in []: #range(len(asphere)):
+                    for j in range(3):
+                        closest = 0, 0, 2 * bond_radius
+                        for k in range(len(atube)):
+                            for l in range(3):
+                                dist = self.length(asphere[i][j] - atube[k][l])
+                                if dist < bond_radius:
+                                    closest = k, l, dist
+                        if closest[2] < bond_radius:
+                            asphere[i][j] = atube[closest[0]][closest[1]]
+                """
+                if bond not in bonds_done:
+                    bonds_done.append(bond)
+                    bond_triangles += atube
+            atom_triangles += asphere
+        save_stl(np.vstack([atom_triangles, bond_triangles]) * scale, name)
 
 def test_molicule():
     h2 = Molecule(["H", "H"], [({0, 1}, 1)])
@@ -158,7 +189,7 @@ caffeine = Molecule(
     ["N", "C", "N"] + # pentagon
     ["O"] * 2 +
     ["C", "H", "H", "H"] * 3 +
-    ["H"]
+    ["H"],
     [
         ({0, 1}, 1), # hexagon
         ({1, 2}, 2),
@@ -169,7 +200,7 @@ caffeine = Molecule(
         
         ({1, 6}, 1), # pentagon
         ({6, 7}, 1),
-        ({7, 8}, 2), # todo this electron is shared (?)
+        ({7, 8}, 2),
         ({8, 2}, 1),
         
         ({0, 9}, 2), # oxygens
@@ -212,9 +243,12 @@ h33 = Molecule(
 h4 = Molecule(["H", "H", "H", "H"], [({0, 1}, 1), ({1, 2}, 1), ({2, 3}, 1), ({0, 3}, 1)])
 #h3 = Molecule(["H", "H", "H"], [({0, 1}, 1), ({1, 2}, 1)])
 h5 = Molecule(["H", "H", "H", "H", "H"], [({0, 1}, 1), ({1, 2}, 1), ({2, 3}, 1), ({3, 4}, 1), ({4, 0}, 1)])
-benzine.iterate_coords(2000)
-benzine.as_image().save("tempout.png")
-benzine.to_stl("benzine")
+
+m = caffeine
+
+m.iterate_coords(2000)
+m.as_image().save("tempout.png")
+m.to_stl("caffeine")
 
 if __name__ == "__main__":
     test_molicule()
