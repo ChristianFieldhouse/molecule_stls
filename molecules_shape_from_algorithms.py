@@ -2,8 +2,11 @@
 
 import numpy as np
 from PIL import Image
-from reality import atoms, radii, gaps
 from scipy.optimize import minimize
+from tqdm import tqdm
+
+from reality import atoms, radii, gaps
+from write_tube import tube, save_stl, sphere
 
 class Molecule:
     def __init__(self, atoms, bonds):
@@ -34,10 +37,11 @@ class Molecule:
         for n in self.neighbours(0):
             step_on([0, n])
         
+        if not cycles:
+            set_cycles = [{0}] # work with trivial cycle
+            cycles = [[0]]
         cycle_atoms = set().union(*set_cycles)
-        if not cycle_atoms:
-            cycle_atoms = {0} # work with trivial cycle
-            
+        print(set_cycles)
         def walk_path(path):
             for atom in self.neighbours(path[-1]) - {path[-2]}:
                 if atom in cycle_atoms: # reached an isolated cycle
@@ -51,7 +55,7 @@ class Molecule:
         for atom in cycle_atoms:
             for n in  self.neighbours(atom) - cycle_atoms:
                 walk_path([atom, n])
-        
+
         """At this point should have a bunch of distinct cycle sets and paths leading
         between them or to nowhere. It remains to find the minimal cycles and
         maximal paths..."""
@@ -67,7 +71,8 @@ class Molecule:
             for list_cycle in cycles:
                 if set(list_cycle) == c:
                     cycles.remove(list_cycle)
-        #print(noncycles)
+        print(noncycles)
+        print(cycles)
         clipped_paths = []
         path_points = set()
         for i in range(len(self.atoms)):
@@ -83,13 +88,16 @@ class Molecule:
                 path_points = path_points.union(set(allpaths_i[j]))
         
         return cycles, clipped_paths
-                
+
     def neighbours(self, atomidx):
         #print(atomidx * "-")
         return set().union(*[b[0] for b in self.bonds if atomidx in b[0]]) - {atomidx}            
 
     def length(self, v):
         return np.sqrt(np.sum(v**2))
+
+    def dist(self, a, b):
+        return self.length(self.coords[a] - self.coords[b])
 
     def set_coords(self):
         self.coords = [None for atom in self.atoms]
@@ -109,47 +117,53 @@ class Molecule:
             for c in cycles[1:]:
                 anchor = set(c).intersection(set_points)
                 if anchor:
+                    print("cycle")
                     if len(anchor) != 2:
                         raise Exception("not implemented for cycles with weird joins")
-                    steps = [self.gap(*b) for b in zip(c, c[1:] + c[:1])]
+                    
                     oanchor = list(anchor)
                     c = c[::-1] # todo: deal with knowing inside from outside...
                     anch_ids = [c.index(a) for a in oanchor]
                     anch_ids.sort()
-                    x_axis = self.coords[c[anch_ids[1]]] - self.coords[c[anch_ids[0]]]
-                    x_axis = x_axis / self.length(x_axis)
-                    #print(c, c[anch_ids[1]], c[anch_ids[0]])
-                    #print(self.coords[c[anch_ids[1]]], self.coords[c[anch_ids[0]]])
-                    #print(x_axis)
-                    y_axis = np.cross(x_axis, (0, 0, -1))
-                    #print(y_axis) # this looks goods so far
+                    c = c[anch_ids[0]:] + c[:anch_ids[0]]
+                    steps = [self.gap(*b) for b in zip(c, c[1:] + c[:1])]
+                    y_axis = self.coords[c[1]] - self.coords[c[0]]
+                    y_axis = y_axis / self.length(y_axis)
+                    print(c, c[1], c[0])
+                    print(self.coords[c[1]], self.coords[c[0]])
+                    print(y_axis)
+                    x_axis = np.cross(y_axis, (0, 0, 1))
+                    print(x_axis) # this looks goods so far
                     # need to construct cyclic polygon with the right orientation...
-                    coords = self.cyclic_polygon(steps, anch_ids[0], x_axis, y_axis)
-                    diff = self.coords[c[anch_ids[0]]] - coords[anch_ids[0]]
+                    coords = self.cyclic_polygon(steps, 0, x_axis, y_axis)
+                    diff = self.coords[c[0]] - coords[0]
                     coords = [coord + diff for coord in coords]
-                    #print(f"{c=}, {coords=}, {steps=}")
+                    print(f"{c=}, {coords=}, {steps=}")
                     for atom, coord in zip(c, coords):
                         self.coords[atom] = coord
                         set_points.add(atom)
 
             for p in noncycles:
+                print(p)
                 anchor = set(p).intersection(set_points)
                 if anchor:
                     anchor = max(p.index(a) for a in anchor)
                     p = p[anchor:] # anchor is p[0]
-                    print(p)
+                    #print(p)
                     ns = self.neighbours(p[0]).intersection(set_points)
-                    print(ns)
+                    #print(ns)
                     d = np.sum([v / self.length(v) for v in [self.coords[p[0]] - self.coords[n] for n in ns]], axis=0)
-                    print("dirs :", [v / self.length(v) for v in [self.coords[p[0]] - self.coords[n] for n in ns]])
+                    #print("dirs :", [v / self.length(v) for v in [self.coords[p[0]] - self.coords[n] for n in ns]])
                     if self.length(d) < 1/100:
-                        print("branching")
-                        d = np.cross(self.coords[ns.pop()] - self.coords[p[0]], (0, 0, 1))
+                        if not ns:
+                            d = np.array((1, 0, 0))
+                        else:
+                            d = np.cross(self.coords[ns.pop()] - self.coords[p[0]], (0, 0, 1))
                     d = d / self.length(d)
-                    print(d)
+                    #print(d)
                     steps = [self.gap(*b) for b in zip(p[:-1], p[1:])]
                     coords = [np.sum(steps[:k]) * d for k in range(len(steps) + 1)]
-                    print(f"{coords=}")
+                    #print(f"{coords=}")
                     diff = self.coords[p[0]] - coords[0]
                     coords = [coord + diff for coord in coords]
                     for atom, coord in zip(p, coords):
@@ -246,6 +260,8 @@ class Molecule:
         return [np.matmul(mat, p) for p in points]
 
     def cyclic_polygon(self, steps, start, x_axis, y_axis):
+        if len(steps) <= 1:
+            return [np.zeros(3)]
         def angle_err(theta):
             r = (max(steps)/2) / np.sin(theta/2)
             return np.abs(sum(
@@ -278,6 +294,8 @@ class Molecule:
         raise Exception(f"no bond between {a} and {b}")
 
     def gap(self, a, b): # bad
+        if a == b:
+            return 0
         bond = self.getbond(a, b)
         pair, e = bond
         pair = list(pair)
@@ -300,6 +318,57 @@ class Molecule:
         
         return Image.fromarray(im.astype("uint8"))
 
+    def to_stl(self, name, scale=1/10):
+        """one picometer gets scaled to `scale` millimeters"""
+        bond_radius = 10
+        atom_triangles = []
+        bond_triangles = []
+        bonds_done = []
+        for i, atom in tqdm(list(enumerate(self.atoms))):
+            asphere = sphere(
+                self.coords[i],
+                radii[atom],
+                20,
+                20,
+            )
+            asphere = [np.array(t) for t in asphere]
+            for bond in [b[0] for b in self.bonds if i in b[0]]:
+                obond = list(bond)
+                dist = self.dist(obond[0], obond[1])
+                r0, r1 = radii[self.atoms[obond[0]]], radii[self.atoms[obond[1]]]
+                direction = self.coords[obond[1]] - self.coords[obond[0]]
+                direction = direction / self.length(direction)
+                atube = tube(
+                    [
+                        self.coords[obond[0]] + r0 * direction,
+                        self.coords[obond[1]] - r1 * direction,
+                    ],
+                    r=bond_radius, # todo : depend on strength of bond?
+                    k=20,
+                    loop=False,
+                )
+                print(len(asphere))
+                # todo : currently having to change print settings to make the
+                # molecule print as one object, should make triangles actually
+                # describe a surface instead of just having spheres + tubes intersecting
+                """ this was very slow, so not worth it...
+                for i in []: #range(len(asphere)):
+                    for j in range(3):
+                        closest = 0, 0, 2 * bond_radius
+                        for k in range(len(atube)):
+                            for l in range(3):
+                                dist = self.length(asphere[i][j] - atube[k][l])
+                                if dist < bond_radius:
+                                    closest = k, l, dist
+                        if closest[2] < bond_radius:
+                            asphere[i][j] = atube[closest[0]][closest[1]]
+                """
+                if bond not in bonds_done:
+                    bonds_done.append(bond)
+                    bond_triangles += atube
+            atom_triangles += asphere
+        save_stl(np.vstack([atom_triangles, bond_triangles]) * scale, name)
+
 def test_molicule():
     pass
     #print(Molecule(["H", "H"], [({0, 1}, 1)]).coords)
@@ -307,8 +376,7 @@ def test_molicule():
     #print(Molecule(["H", "H", "H", "H"], [({0, 1}, 1), ({1, 2}, 1), ({2, 0}, 1), ({2, 3}, 1)]).coords)#
     #print(Molecule(["H", "H", "H", "H", "H"], [{0, 1}, {1, 2}, {2, 3}, {1, 4}]).paths)
     
-    
-    
+h2 = Molecule(["H", "H"], [({0, 1}, 1)])
 
 benzine = Molecule(
     ["C"]*6 + ["H"]*6,
